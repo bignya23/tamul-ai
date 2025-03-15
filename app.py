@@ -135,7 +135,7 @@ async def process_audio_stream(websocket: WebSocket):
                 print(f"🛑 Silence detected ({silent_chunks}/{chunks_needed})")
             else:
                 silent_chunks = 0  # Properly reset on speech
-                print("🎙️ Speech detected")
+                print("🎙 Speech detected")
 
             # Close the WebSocket if sustained silence is detected
             if silent_chunks >= chunks_needed:
@@ -212,7 +212,6 @@ async def process_file(file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=str(e))
     
 
-active_users = {}
 
 
 async def endpoint_user(user_id, user_message,  websocket : WebSocket):
@@ -301,31 +300,36 @@ async def endpoint_user(user_id, user_message,  websocket : WebSocket):
             break
 
 
+
+active_users = {}
+
+
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     user_id = str(uuid.uuid4())  
     active_users[user_id] = websocket  
-
+    end_of_podcast = False
     podcast_agent = PodcastAgent()
     alex_response_queue = queue.Queue()
     emma_response_queue = queue.Queue()
     alex_tts_queue = queue.Queue()
     emma_tts_queue = queue.Queue()
-
+    prev_alex = ""
+    prev_emma = ""
     try:
         # Generate initial AI response
         await podcast_agent.generate_alex_response("", "1", alex_response_queue, pdf_content=text_summary)
         alex_output, conversation_stage = alex_response_queue.get()
         store_chat_history(user_id, "Alex", alex_output, conversation_stage)
         await podcast_agent.generate_tts(alex_output, "male", alex_tts_queue)
-
+        prev_alex = alex_output
         conversation_history = get_chat_history(user_id)
         await podcast_agent.generate_emma_response(conversation_history, conversation_stage, emma_response_queue, pdf_content=text_summary)
         emma_output, conversation_stage = emma_response_queue.get()
         store_chat_history(user_id, "Emma", emma_output, conversation_stage)
         await podcast_agent.generate_tts(emma_output, "female", emma_tts_queue)
-
+        prev_emma = emma_output
         conversation_history = get_chat_history(user_id)
         await podcast_agent.generate_alex_response(conversation_history, conversation_stage, alex_response_queue, pdf_content=text_summary)
         alex_output, conversation_stage = alex_response_queue.get()
@@ -338,16 +342,23 @@ async def websocket_endpoint(websocket: WebSocket):
             emma_task = asyncio.create_task(podcast_agent.generate_emma_response(conversation_history, conversation_stage, emma_response_queue, text_summary))
 
             file_path_male = alex_tts_queue.get()
-            await websocket.send_json({"speaker": "Alex", "text": alex_output, "audio": file_path_male, "stage": conversation_stage})
+            await websocket.send_json({"speaker": "Alex", "text": prev_alex, "audio": file_path_male, "stage": conversation_stage})
+            prev_alex = alex_output
 
             await alex_tts_task
             await emma_task
+
+            if end_of_podcast == True:
+                print("Podcast Ended ... Closing Socket")
+                await websocket.close()
+                print(f"User {user_id} disconnected")
+                del active_users[user_id]
+                break
 
             response = await websocket.receive_json()
 
             # If user sends "chunks", start audio processing
             if response['message'] == "chunks":
-                
                 await process_audio_stream(websocket) 
                 print("audio procesing ended")# Process audio properly
                 # await websocket.send_json({"FINAL": final_text})
@@ -359,6 +370,10 @@ async def websocket_endpoint(websocket: WebSocket):
                     print("Loop ended")
 
             emma_output, conversation_stage = emma_response_queue.get()
+            if emma_output.endswith("[end_of_podcast]"):
+                end_of_podcast = True
+                emma_output = emma_output.removesuffix("[end_of_podcast]").rstrip()
+
             store_chat_history(user_id, "Emma", emma_output, conversation_stage)
 
             conversation_history = get_chat_history(user_id)
@@ -368,10 +383,17 @@ async def websocket_endpoint(websocket: WebSocket):
             emma_tts_task = asyncio.create_task(podcast_agent.generate_tts(emma_output, "female", emma_tts_queue))
 
             file_path_female = emma_tts_queue.get()
-            await websocket.send_json({"speaker": "Emma", "text": emma_output, "audio": file_path_female, "stage": conversation_stage})
-
+            await websocket.send_json({"speaker": "Emma", "text": prev_emma, "audio": file_path_female, "stage": conversation_stage})
+            prev_emma = emma_output
             await emma_tts_task
             await alex_task
+
+            if end_of_podcast == True:
+                print("Podcast Ended ... Closing Socket")
+                await websocket.close()
+                print(f"User {user_id} disconnected")
+                del active_users[user_id]
+                break
 
             response = await websocket.receive_json()
 
@@ -387,7 +409,14 @@ async def websocket_endpoint(websocket: WebSocket):
                     print("Loop ended")
 
             alex_output, conversation_stage = alex_response_queue.get()
+            if alex_output.endswith("[end_of_podcast]"):
+                end_of_podcast = True
+                alex_output = alex_output.removesuffix("[end_of_podcast]").rstrip()
+
+
             store_chat_history(user_id, "Alex", alex_output, conversation_stage)
+
+
 
     except WebSocketDisconnect:
         print(f"User {user_id} disconnected")
