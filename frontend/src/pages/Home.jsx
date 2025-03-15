@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from "react";
-
+import toast from "react-hot-toast";
 const Home = () => {
   const [input, setInput] = useState("");
   const [file, setFile] = useState(null);
@@ -169,6 +169,28 @@ const Home = () => {
           },
         ]);
       };
+
+      // Close WebSocket after 1 minute
+      setTimeout(() => {
+        if (ws.current && ws.current.readyState === WebSocket.OPEN) {
+          ws.current.close();
+          setIsPodcastActive(false);
+          setIsAudioPlaying(false)
+          // console.log("WebSocket closed after 5 minute");
+          toast.error(
+            "Sorry for the inconvenience! Beta mode has only a 5-minute limit"
+          );
+          setMessages((prev) => [
+            ...prev,
+            {
+              type: "system",
+              speaker: "System",
+              content: "Podcast session has ended automatically.",
+              time: new Date().toLocaleTimeString(),
+            },
+          ]);
+        }
+      }, 300000);
 
       ws.current.onmessage = async (event) => {
         try {
